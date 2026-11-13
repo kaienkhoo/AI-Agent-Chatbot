@@ -1,7 +1,7 @@
 from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 from openai import APIConnectionError
-from main import app, client
+from main import app, client, find_product
 
 test_client = TestClient(app)
 
@@ -10,8 +10,50 @@ def test_chat_returns_503_when_openai_unreachable():
     fake_error = APIConnectionError(request=Mock())
 
     with patch.object(client.responses, "create", side_effect=fake_error):
-        response = test_client.post("/chat", json={"message": "Hello!"})
+        response = test_client.post(
+            "/chat", json={"chats": [{"role": "user", "content": "Hello!"}]}
+        )
 
     # Your assertions go here
     assert response.status_code == 503
     assert response.json() == {"detail": "AI service temporarily unavailable"}
+
+
+def test_find_product_returns_correct_name():
+    product_id = 101
+
+    result = find_product(product_id)
+
+    assert result is not None
+    assert result["name"] == "Wireless Mouse"
+
+
+def test_find_product_returns_none_for_missing_product():
+    # Arrange
+    product_id = 999
+
+    # Act
+    result = find_product(product_id)
+
+    # Assert
+    assert result is None
+
+
+def test_get_product_returns_correct_product():
+    response = test_client.get("/products/101")
+
+    # Your assertions here
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": 101,
+        "name": "Wireless Mouse",
+        "price": 49.90,
+        "stock": 5,
+    }
+
+
+def test_get_product_returns_404_for_missing_product():
+    response = test_client.get("/products/999")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Product with ID 999 not found"}
