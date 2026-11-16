@@ -117,3 +117,45 @@ def test_chat_returns_answer_with_tool_call():
     assert product_data["id"] == 102
     assert product_data["stock"] == 2
     assert second_call.kwargs["previous_response_id"] == "response_123"
+
+
+def test_chat_handles_missing_product():
+    fake_tool_call = Mock(
+        type="function_call",
+        arguments='{"product_id":999}',
+        call_id="call_123",
+    )
+
+    fake_tool_call.name = "get_product"
+
+    fake_first_response = Mock(
+        id="response_123",
+        output=[fake_tool_call],
+    )
+
+    fake_second_response = Mock(
+        output=[],
+        output_text="Sorry, product 999 was not found.",
+    )
+
+    fake_api = Mock()
+
+    fake_api.side_effect = [fake_first_response, fake_second_response]
+
+    with patch.object(client.responses, "create", fake_api) as mock_create:
+        response = test_client.post(
+            "/chat",
+            json={"chats": [{"role": "user", "content": "Product 999 stocks"}]},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"answer": "Sorry, product 999 was not found."}
+    assert mock_create.call_count == 2
+
+    second_call = mock_create.call_args_list[1]
+    tool_message = second_call.kwargs["input"][0]
+    product_data = json.loads(tool_message["output"])
+
+    assert tool_message["call_id"] == "call_123"
+    assert product_data["error"] == "product_not_found"
+    assert product_data["product_id"] == 999
