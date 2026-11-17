@@ -2,7 +2,8 @@ import json
 from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 from openai import APIConnectionError
-from main import app, client, find_product
+from main import app, client, orders, find_product, find_order
+from copy import deepcopy
 
 test_client = TestClient(app)
 
@@ -159,3 +160,115 @@ def test_chat_handles_missing_product():
     assert tool_message["call_id"] == "call_123"
     assert product_data["error"] == "product_not_found"
     assert product_data["product_id"] == 999
+
+
+def test_find_order_returns_correct_order():
+    order_id = 5001
+
+    result = find_order(order_id)
+
+    assert result is not None
+    assert result["product_id"] == 102
+
+
+def test_find_order_returns_none_for_missing_order():
+    order_id = 9999
+
+    result = find_order(order_id)
+
+    assert result is None
+
+
+def test_find_order_does_not_modify_orders():
+    original_order = deepcopy(orders)
+
+    find_order(5001)
+
+    assert orders == original_order
+
+
+def test_chat_returns_answer_with_order_tool():
+    fake_tool_call = Mock(
+        type="function_call",
+        arguments='{"order_id":5001}',
+        call_id="call_123",
+    )
+
+    fake_tool_call.name = "get_order"
+
+    fake_first_response = Mock(
+        id="response_123",
+        output=[fake_tool_call],
+    )
+
+    fake_second_response = Mock(
+        output=[],
+        output_text="Order 5001 has been delivered.",
+    )
+
+    fake_api = Mock()
+
+    fake_api.side_effect = [fake_first_response, fake_second_response]
+
+    with patch.object(client.responses, "create", fake_api) as mock_create:
+        response = test_client.post(
+            "/chat",
+            json={"chats": [{"role": "user", "content": "Order 5001"}]},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"answer": "Order 5001 has been delivered."}
+    assert mock_create.call_count == 2
+
+    second_call = mock_create.call_args_list[1]  # Second call
+    tool_message = second_call.kwargs["input"][0]
+    order_data = json.loads(tool_message["output"])
+
+    assert tool_message["call_id"] == "call_123"
+    assert order_data["product_id"] == 102
+    assert order_data["id"] == 5001
+    assert order_data["status"] == "delivered"
+    assert second_call.kwargs["previous_response_id"] == "response_123"
+
+
+def test_chat_handles_missing_order():
+    fake_tool_call = Mock(
+        type="function_call",
+        arguments='{"order_id":9999}',
+        call_id="call_123",
+    )
+
+    fake_tool_call.name = "get_order"
+
+    fake_first_response = Mock(
+        id="response_123",
+        output=[fake_tool_call],
+    )
+
+    fake_second_response = Mock(
+        output=[],
+        output_text="Sorry, order 9999 was not found.",
+    )
+
+    fake_api = Mock()
+
+    fake_api.side_effect = [fake_first_response, fake_second_response]
+
+    with patch.object(client.responses, "create", fake_api) as mock_create:
+        response = test_client.post(
+            "/chat",
+            json={"chats": [{"role": "user", "content": "Order 9999"}]},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"answer": "Sorry, order 9999 was not found."}
+    assert mock_create.call_count == 2
+
+    second_call = mock_create.call_args_list[1]
+    tool_message = second_call.kwargs["input"][0]
+    order_data = json.loads(tool_message["output"])
+
+    assert second_call.kwargs["previous_response_id"] == "response_123"
+    assert tool_message["call_id"] == "call_123"
+    assert order_data["error"] == "order_not_found"
+    assert order_data["order_id"] == 9999

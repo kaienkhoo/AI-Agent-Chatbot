@@ -23,6 +23,21 @@ products = [
     {"id": 103, "name": "Wireless Keyboard", "price": 149.90, "stock": 3},
 ]
 
+orders = [
+    {
+        "id": 5001,
+        "product_id": 102,
+        "quantity": 1,
+        "status": "delivered",
+    },
+    {
+        "id": 5002,
+        "product_id": 101,
+        "quantity": 2,
+        "status": "processing",
+    },
+]
+
 product_tool = {
     "type": "function",
     "name": "get_product",
@@ -40,6 +55,27 @@ product_tool = {
     },
     "strict": True,
 }
+
+order_tool = {
+    "type": "function",
+    "name": "get_order",
+    "description": "Retrieve order details using order ID.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "order_id": {
+                "type": "integer",
+                "description": "The ID of the order to retrieve",
+            }
+        },
+        "required": ["order_id"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
+
+TOOL_DEFINITIONS = [product_tool, order_tool]
 
 
 class Chat(BaseModel):
@@ -59,43 +95,70 @@ def find_product(product_id: int):
     return None
 
 
+def find_order(order_id: int):
+    for order in orders:
+        if order["id"] == order_id:
+            return order
+
+    return None
+
+
+TOOL_HANDLERS = {
+    "get_product": find_product,
+    "get_order": find_order,
+}
+
+
 @app.post("/chat")
 def chat(request: ChatHistory):
     try:
         response = client.responses.create(
             model="gpt-5.6-terra",
             input=[{"role": c.role, "content": c.content} for c in request.chats],
-            tools=[product_tool],
+            tools=TOOL_DEFINITIONS,
             parallel_tool_calls=False,
         )
 
         for item in response.output:
             if item.type == "function_call":
-                if item.name == "get_product":
-                    args = json.loads(item.arguments)
+                tool_name = item.name
 
-                    product = find_product(args["product_id"])
+                args = json.loads(item.arguments)
 
-                    if product is not None:
-                        result = product
-                    else:
+                handler = TOOL_HANDLERS.get(tool_name)
+
+                if handler is None:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Unsupported tool requested",
+                    )
+
+                result = handler(**args)
+
+                if result is None:
+                    if tool_name == "get_product":
                         result = {
                             "error": "product_not_found",
                             "product_id": args["product_id"],
                         }
+                    elif tool_name == "get_order":
+                        result = {
+                            "error": "order_not_found",
+                            "order_id": args["order_id"],
+                        }
 
-                    tool_result = {
-                        "type": "function_call_output",
-                        "call_id": item.call_id,
-                        "output": json.dumps(result),
-                    }
+                tool_result = {
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": json.dumps(result),
+                }
 
-                    response = client.responses.create(
-                        model="gpt-5.6-terra",
-                        input=[tool_result],
-                        tool_choice="none",
-                        previous_response_id=response.id,
-                    )
+                response = client.responses.create(
+                    model="gpt-5.6-terra",
+                    input=[tool_result],
+                    tool_choice="none",
+                    previous_response_id=response.id,
+                )
 
         return {"answer": response.output_text}
     except APIConnectionError:
