@@ -74,6 +74,20 @@ order_tool = {
     "strict": True,
 }
 
+AGENT_INSTRUCTIONS = """
+You are a customer support assistant for an online store.
+
+Use the available tools to look up products and orders.
+For questions about current prices, inventory, or order status,
+retrieve the relevant information rather than relying on
+previous conversation messages.
+
+Only state product and order facts supported by tool results.
+Do not invent unavailable information.
+
+If a record cannot be found, explain that clearly.
+Keep your answers concise and helpful.
+"""
 
 TOOL_DEFINITIONS = [product_tool, order_tool]
 
@@ -114,53 +128,74 @@ def chat(request: ChatHistory):
     try:
         response = client.responses.create(
             model="gpt-5.6-terra",
+            instructions=AGENT_INSTRUCTIONS,
             input=[{"role": c.role, "content": c.content} for c in request.chats],
             tools=TOOL_DEFINITIONS,
             parallel_tool_calls=False,
         )
 
-        for item in response.output:
-            if item.type == "function_call":
-                tool_name = item.name
+        max_tool_rounds = 3
+        tool_rounds = 0
 
-                args = json.loads(item.arguments)
+        while True:
+            tool_calls = [
+                item for item in response.output if item.type == "function_call"
+            ]
 
-                handler = TOOL_HANDLERS.get(tool_name)
+            if not tool_calls:
+                return {"answer": response.output_text}
 
-                if handler is None:
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Unsupported tool requested",
-                    )
-
-                result = handler(**args)
-
-                if result is None:
-                    if tool_name == "get_product":
-                        result = {
-                            "error": "product_not_found",
-                            "product_id": args["product_id"],
-                        }
-                    elif tool_name == "get_order":
-                        result = {
-                            "error": "order_not_found",
-                            "order_id": args["order_id"],
-                        }
-
-                tool_result = {
-                    "type": "function_call_output",
-                    "call_id": item.call_id,
-                    "output": json.dumps(result),
-                }
-
-                response = client.responses.create(
-                    model="gpt-5.6-terra",
-                    input=[tool_result],
-                    tool_choice="none",
-                    previous_response_id=response.id,
+            if tool_rounds >= max_tool_rounds:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Agent tool execution limit reached",
                 )
 
-        return {"answer": response.output_text}
+            tool_call = tool_calls[0]
+
+            tool_name = tool_call.name
+
+            args = json.loads(tool_call.arguments)
+
+            handler = TOOL_HANDLERS.get(tool_name)
+
+            if handler is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Unsupported tool requested",
+                )
+
+            result = handler(**args)
+
+            if result is None:
+                if tool_name == "get_product":
+                    result = {
+                        "error": "product_not_found",
+                        "product_id": args["product_id"],
+                    }
+                elif tool_name == "get_order":
+                    result = {
+                        "error": "order_not_found",
+                        "order_id": args["order_id"],
+                    }
+
+            tool_result = {
+                "type": "function_call_output",
+                "call_id": tool_call.call_id,
+                "output": json.dumps(result),
+            }
+
+            tool_rounds += 1
+
+            response = client.responses.create(
+                model="gpt-5.6-terra",
+                instructions=AGENT_INSTRUCTIONS,
+                input=[tool_result],
+                tools=TOOL_DEFINITIONS,
+                tool_choice="auto",
+                parallel_tool_calls=False,
+                previous_response_id=response.id,
+            )
     except APIConnectionError:
         raise HTTPException(
             status_code=503, detail="AI service temporarily unavailable"
