@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError, ConfigDict
 from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError
 from fastapi.middleware.cors import CORSMiddleware
@@ -101,6 +101,24 @@ class ChatHistory(BaseModel):
     chats: list[Chat]
 
 
+class ProductLookupArgs(BaseModel):
+    model_config = ConfigDict(
+        strict=True,
+        extra="forbid",
+    )
+
+    product_id: int
+
+
+class OrderLookupArgs(BaseModel):
+    model_config = ConfigDict(
+        strict=True,
+        extra="forbid",
+    )
+
+    order_id: int
+
+
 def find_product(product_id: int):
     for product in products:
         if product["id"] == product_id:
@@ -120,6 +138,11 @@ def find_order(order_id: int):
 TOOL_HANDLERS = {
     "get_product": find_product,
     "get_order": find_order,
+}
+
+TOOL_ARG_MODELS = {
+    "get_product": ProductLookupArgs,
+    "get_order": OrderLookupArgs,
 }
 
 
@@ -155,17 +178,33 @@ def chat(request: ChatHistory):
 
             tool_name = tool_call.name
 
-            args = json.loads(tool_call.arguments)
+            try:
+                args = json.loads(tool_call.arguments)
+            except json.JSONDecodeError:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Invalid tool arguments received",
+                )
 
             handler = TOOL_HANDLERS.get(tool_name)
 
-            if handler is None:
+            argument_model = TOOL_ARG_MODELS.get(tool_name)
+
+            if handler is None or argument_model is None:
                 raise HTTPException(
                     status_code=500,
                     detail="Unsupported tool requested",
                 )
 
-            result = handler(**args)
+            try:
+                validated = argument_model.model_validate(args)
+            except ValidationError:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Invalid tool arguments received",
+                )
+
+            result = handler(**validated.model_dump())
 
             if result is None:
                 if tool_name == "get_product":

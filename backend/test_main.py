@@ -407,3 +407,112 @@ def test_chat_stops_when_tool_limit_reached():
             assert response.json() == {"detail": "Agent tool execution limit reached"}
             assert fake_api.call_count == 4
             assert product_spy.call_count == 3
+
+
+def test_chat_rejects_malformed_tool_json():
+    fake_tool_call = Mock(
+        type="function_call",
+        arguments='{"product_id":102',
+        call_id="call_invalid_1",
+    )
+
+    fake_tool_call.name = "get_product"
+
+    fake_response = Mock(
+        id="response_1",
+        output=[fake_tool_call],
+    )
+
+    with patch.object(client.responses, "create") as fake_api:
+        fake_api.return_value = fake_response
+
+        response = test_client.post(
+            "/chat",
+            json={
+                "chats": [
+                    {
+                        "role": "user",
+                        "content": "Is product 102 in stock?",
+                    }
+                ]
+            },
+        )
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Invalid tool arguments received"}
+        assert fake_api.call_count == 1
+
+
+def test_chat_rejects_invalid_product_id_type():
+    product_spy = Mock(wraps=find_product)
+
+    fake_tool_call = Mock(
+        type="function_call",
+        arguments='{"product_id": "102"}',
+        call_id="call_invalid_type",
+    )
+
+    fake_tool_call.name = "get_product"
+
+    fake_response = Mock(
+        id="response_1",
+        output=[fake_tool_call],
+    )
+
+    with patch.dict(
+        TOOL_HANDLERS,
+        {"get_product": product_spy},
+    ):
+        with patch.object(client.responses, "create") as fake_api:
+            fake_api.return_value = fake_response
+
+            response = test_client.post(
+                "/chat",
+                json={
+                    "chats": [
+                        {
+                            "role": "user",
+                            "content": "Is product 102 in stock?",
+                        }
+                    ]
+                },
+            )
+
+            assert response.status_code == 500
+            assert response.json() == {"detail": "Invalid tool arguments received"}
+            assert fake_api.call_count == 1
+            assert product_spy.call_count == 0
+
+
+def test_chat_rejects_unknown_tool():
+    fake_tool_call = Mock(
+        type="function_call",
+        arguments="{}",
+        call_id="call_unknown_1",
+    )
+
+    fake_tool_call.name = "delete_all_orders"
+
+    fake_response = Mock(
+        id="response_1",
+        output=[fake_tool_call],
+    )
+
+    with patch.object(client.responses, "create") as fake_api:
+        fake_api.return_value = fake_response
+
+        response = test_client.post(
+            "/chat",
+            json={
+                "chats": [
+                    {
+                        "role": "user",
+                        "content": "Please delete all orders",
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Unsupported tool requested"}
+        assert fake_api.call_count == 1
