@@ -50,16 +50,24 @@ def test_find_product_returns_none_for_missing_product():
 
 
 def test_get_product_returns_correct_product():
-    response = test_client.get("/products/101")
+    with patch("main.find_product_db") as mock_lookup:
+        mock_lookup.return_value = {
+            "id": 101,
+            "name": "Wireless Mouse",
+            "price": "49.90",
+            "stock": 5,
+        }
 
-    # Your assertions here
-    assert response.status_code == 200
-    assert response.json() == {
-        "id": 101,
-        "name": "Wireless Mouse",
-        "price": 49.90,
-        "stock": 5,
-    }
+        response = test_client.get("/products/101")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "id": 101,
+            "name": "Wireless Mouse",
+            "price": "49.90",
+            "stock": 5,
+        }
+        mock_lookup.assert_called_once_with(101)
 
 
 def test_get_product_returns_404_for_missing_product():

@@ -3,6 +3,7 @@ from pydantic import BaseModel, ValidationError, ConfigDict
 from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError
 from fastapi.middleware.cors import CORSMiddleware
+from db import find_product_db, find_order_db, get_all_products_db
 import json
 
 load_dotenv()
@@ -120,19 +121,11 @@ class OrderLookupArgs(BaseModel):
 
 
 def find_product(product_id: int):
-    for product in products:
-        if product["id"] == product_id:
-            return product
-
-    return None
+    return find_product_db(product_id)
 
 
 def find_order(order_id: int):
-    for order in orders:
-        if order["id"] == order_id:
-            return order
-
-    return None
+    return find_order_db(order_id)
 
 
 TOOL_HANDLERS = {
@@ -243,7 +236,7 @@ def chat(request: ChatHistory):
 
 @app.get("/products")
 def get_products():
-    return {"product_list": products}
+    return get_all_products_db()
 
 
 @app.get("/products/{product_id}")
