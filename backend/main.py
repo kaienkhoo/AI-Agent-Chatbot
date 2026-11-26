@@ -1,10 +1,18 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, ValidationError, ConfigDict
+from pydantic import BaseModel, ValidationError, ConfigDict, Field
 from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError
 from fastapi.middleware.cors import CORSMiddleware
-from db import find_product_db, find_order_db, get_all_products_db
+from fastapi.encoders import jsonable_encoder
+from db import (
+    find_product_db,
+    find_order_db,
+    get_all_products_db,
+    prepare_order_db,
+    confirm_order_db,
+)
 import json
+import os
 
 load_dotenv()
 
@@ -17,27 +25,6 @@ app.add_middleware(
     allow_methods=["POST"],
     allow_headers=["Content-Type"],
 )
-
-products = [
-    {"id": 101, "name": "Wireless Mouse", "price": 49.90, "stock": 5},
-    {"id": 102, "name": "Wireless Headphone", "price": 99.90, "stock": 2},
-    {"id": 103, "name": "Wireless Keyboard", "price": 149.90, "stock": 3},
-]
-
-orders = [
-    {
-        "id": 5001,
-        "product_id": 102,
-        "quantity": 1,
-        "status": "delivered",
-    },
-    {
-        "id": 5002,
-        "product_id": 101,
-        "quantity": 2,
-        "status": "processing",
-    },
-]
 
 product_tool = {
     "type": "function",
@@ -75,6 +62,34 @@ order_tool = {
     "strict": True,
 }
 
+
+prepare_order = {
+    "type": "function",
+    "name": "prepare_order",
+    "description": (
+        "Prepare a pending order draft when the customer explicitly "
+        "requests to purchase a product. This does not place or confirm "
+        "the order. Customer confirmation is required separately."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "product_id": {
+                "type": "integer",
+                "description": "The ID of the product to order",
+            },
+            "quantity": {
+                "type": "integer",
+                "description": "The quantity of the product to order",
+            },
+        },
+        "required": ["product_id", "quantity"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
+
 AGENT_INSTRUCTIONS = """
 You are a customer support assistant for an online store.
 
@@ -88,9 +103,26 @@ Do not invent unavailable information.
 
 If a record cannot be found, explain that clearly.
 Keep your answers concise and helpful.
+
+When the customer explicitly requests to purchase a product,
+you may use prepare_order to create a pending draft.
+
+Only prepare a draft when the product ID and quantity are clear.
+If either is unclear, ask the customer for clarification.
+Do not guess a product ID or quantity.
+
+Preparing a draft does not place an order.
+Tell the customer to review the draft and explicitly confirm
+through the application's confirmation interface.
+
+Never claim an order has been placed just because a draft exists.
 """
 
-TOOL_DEFINITIONS = [product_tool, order_tool]
+TOOL_DEFINITIONS = [
+    product_tool,
+    order_tool,
+    prepare_order,
+]
 
 
 class Chat(BaseModel):
@@ -120,6 +152,13 @@ class OrderLookupArgs(BaseModel):
     order_id: int
 
 
+class PrepareOrderRequest(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    product_id: int = Field(gt=0)
+    quantity: int = Field(gt=0, le=10)
+
+
 def find_product(product_id: int):
     return find_product_db(product_id)
 
@@ -128,30 +167,61 @@ def find_order(order_id: int):
     return find_order_db(order_id)
 
 
+def prepare_order_tool(product_id: int, quantity: int):
+    require_demo_ordering()
+
+    try:
+        draft = prepare_order_db(product_id, quantity)
+
+        return draft
+    except ValueError:
+        return {"error": "product_unavailable_or_insufficient_stock"}
+
+
+def get_available_tools():
+    tools = [product_tool, order_tool]
+
+    if os.getenv("ENABLE_DEMO_ORDERS") == "true":
+        tools.append(prepare_order)
+
+    return tools
+
+
 TOOL_HANDLERS = {
     "get_product": find_product,
     "get_order": find_order,
+    "prepare_order": prepare_order_tool,
 }
 
 TOOL_ARG_MODELS = {
     "get_product": ProductLookupArgs,
     "get_order": OrderLookupArgs,
+    "prepare_order": PrepareOrderRequest,
 }
+
+
+def require_demo_ordering():
+    if os.getenv("ENABLE_DEMO_ORDERS") != "true":
+        raise HTTPException(status_code=404, detail="Not found")
 
 
 @app.post("/chat")
 def chat(request: ChatHistory):
+    available_tools = get_available_tools()
+
     try:
         response = client.responses.create(
             model="gpt-5.6-terra",
             instructions=AGENT_INSTRUCTIONS,
             input=[{"role": c.role, "content": c.content} for c in request.chats],
-            tools=TOOL_DEFINITIONS,
+            tools=available_tools,
             parallel_tool_calls=False,
         )
 
         max_tool_rounds = 3
         tool_rounds = 0
+
+        created_draft = None
 
         while True:
             tool_calls = [
@@ -159,7 +229,10 @@ def chat(request: ChatHistory):
             ]
 
             if not tool_calls:
-                return {"answer": response.output_text}
+                return {
+                    "answer": response.output_text,
+                    "order_draft": jsonable_encoder(created_draft),
+                }
 
             if tool_rounds >= max_tool_rounds:
                 raise HTTPException(
@@ -197,7 +270,17 @@ def chat(request: ChatHistory):
                     detail="Invalid tool arguments received",
                 )
 
-            result = handler(**validated.model_dump())
+            if tool_name == "prepare_order" and created_draft is not None:
+                result = {"error": "draft_already_prepared"}
+            else:
+                result = handler(**validated.model_dump())
+
+                if (
+                    tool_name == "prepare_order"
+                    and isinstance(result, dict)
+                    and "id" in result
+                ):
+                    created_draft = result
 
             if result is None:
                 if tool_name == "get_product":
@@ -214,7 +297,7 @@ def chat(request: ChatHistory):
             tool_result = {
                 "type": "function_call_output",
                 "call_id": tool_call.call_id,
-                "output": json.dumps(result),
+                "output": json.dumps(jsonable_encoder(result)),
             }
 
             tool_rounds += 1
@@ -223,15 +306,43 @@ def chat(request: ChatHistory):
                 model="gpt-5.6-terra",
                 instructions=AGENT_INSTRUCTIONS,
                 input=[tool_result],
-                tools=TOOL_DEFINITIONS,
+                tools=available_tools,
                 tool_choice="auto",
                 parallel_tool_calls=False,
                 previous_response_id=response.id,
             )
     except APIConnectionError:
         raise HTTPException(
-            status_code=503, detail="AI service temporarily unavailable"
+            status_code=503,
+            detail="AI service temporarily unavailable",
         )
+
+
+@app.post("/order-drafts", status_code=201)
+def prepare_order_route(request: PrepareOrderRequest):
+    require_demo_ordering()
+
+    try:
+        prepare_order = prepare_order_db(request.product_id, request.quantity)
+
+        return prepare_order
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Product unavailable or insufficient stock",
+        )
+
+
+@app.post("/order-drafts/{draft_id}/confirm")
+def confirm_order_route(draft_id: str):
+    require_demo_ordering()
+
+    try:
+        confirmed_order = confirm_order_db(draft_id)
+
+        return confirmed_order
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Order confirmation failed")
 
 
 @app.get("/products")

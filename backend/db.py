@@ -112,7 +112,7 @@ def prepare_order_db(product_id: int, quantity: int):
     with get_connection() as conn:
         available_product = conn.execute(
             """
-            SELECT id, stock
+            SELECT id, name, price, stock
             FROM products
             WHERE id = %s
                 AND stock >= %s;
@@ -140,6 +140,11 @@ def prepare_order_db(product_id: int, quantity: int):
                 quantity,
             ),
         ).fetchone()
+
+        total_price = available_product["price"] * quantity
+        order_drafts["product_name"] = available_product["name"]
+        order_drafts["unit_price"] = str(available_product["price"])
+        order_drafts["total_price"] = str(total_price)
 
     return order_drafts
 

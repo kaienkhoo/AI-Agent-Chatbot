@@ -5,7 +5,6 @@ from openai import APIConnectionError
 from main import (
     app,
     client,
-    orders,
     find_product,
     find_order,
     TOOL_HANDLERS,
@@ -89,7 +88,10 @@ def test_chat_returns_answer_without_tool_call():
         )
 
     assert response.status_code == 200
-    assert response.json() == {"answer": "Hello from fake OpenAI!"}
+    assert response.json() == {
+        "answer": "Hello from fake OpenAI!",
+        "order_draft": None,
+    }
     assert mock_create.call_count == 1
 
 
@@ -123,7 +125,10 @@ def test_chat_returns_answer_with_tool_call():
         )
 
     assert response.status_code == 200
-    assert response.json() == {"answer": "Product 102 has 2 units available"}
+    assert response.json() == {
+        "answer": "Product 102 has 2 units available",
+        "order_draft": None,
+    }
     assert mock_create.call_count == 2
 
     second_call = mock_create.call_args_list[1]  # Second call
@@ -166,7 +171,10 @@ def test_chat_handles_missing_product():
         )
 
     assert response.status_code == 200
-    assert response.json() == {"answer": "Sorry, product 999 was not found."}
+    assert response.json() == {
+        "answer": "Sorry, product 999 was not found.",
+        "order_draft": None,
+    }
     assert mock_create.call_count == 2
 
     second_call = mock_create.call_args_list[1]
@@ -195,12 +203,19 @@ def test_find_order_returns_none_for_missing_order():
     assert result is None
 
 
-def test_find_order_does_not_modify_orders():
-    original_order = deepcopy(orders)
+def test_find_order_delegates_to_database():
+    expected_order = {
+        "id": 5001,
+        "product_id": 102,
+        "quantity": 1,
+        "status": "delivered",
+    }
 
-    find_order(5001)
+    with patch("main.find_order_db", return_value=expected_order) as mock_lookup:
+        result = find_order(5001)
 
-    assert orders == original_order
+        assert result == expected_order
+        mock_lookup.assert_called_once_with(5001)
 
 
 def test_chat_returns_answer_with_order_tool():
@@ -233,7 +248,10 @@ def test_chat_returns_answer_with_order_tool():
         )
 
     assert response.status_code == 200
-    assert response.json() == {"answer": "Order 5001 has been delivered."}
+    assert response.json() == {
+        "answer": "Order 5001 has been delivered.",
+        "order_draft": None,
+    }
     assert mock_create.call_count == 2
 
     second_call = mock_create.call_args_list[1]  # Second call
@@ -277,7 +295,10 @@ def test_chat_handles_missing_order():
         )
 
     assert response.status_code == 200
-    assert response.json() == {"answer": "Sorry, order 9999 was not found."}
+    assert response.json() == {
+        "answer": "Sorry, order 9999 was not found.",
+        "order_draft": None,
+    }
     assert mock_create.call_count == 2
 
     second_call = mock_create.call_args_list[1]
@@ -344,6 +365,7 @@ def test_chat_multi_step_order_then_product():
         assert response.status_code == 200
         assert response.json() == {
             "answer": "Order 5001 status is delivered and stock is 2.",
+            "order_draft": None,
         }
         assert fake_api.call_count == 3
 
@@ -524,3 +546,62 @@ def test_chat_rejects_unknown_tool():
         assert response.status_code == 500
         assert response.json() == {"detail": "Unsupported tool requested"}
         assert fake_api.call_count == 1
+
+
+def test_chat_returns_created_order_draft():
+    fake_draft = {
+        "id": "test-draft-123",
+        "product_id": 101,
+        "quantity": 1,
+        "status": "pending",
+        "product_name": "Wireless Mouse",
+        "unit_price": "49.90",
+        "total_price": "49.90",
+    }
+
+    fake_tool_call = Mock(
+        type="function_call",
+        arguments='{"product_id": 101, "quantity": 1}',
+        call_id="call_prepare_1",
+    )
+
+    fake_tool_call.name = "prepare_order"
+
+    fake_first_response = Mock(
+        id="response_1",
+        output=[fake_tool_call],
+    )
+
+    fake_second_response = Mock(
+        output=[],
+        output_text="Your order draft is ready.",
+    )
+
+    with (
+        patch.dict("os.environ", {"ENABLE_DEMO_ORDERS": "true"}),
+        patch.object(
+            client.responses,
+            "create",
+            side_effect=[fake_first_response, fake_second_response],
+        ) as mock_create,
+        patch(
+            "main.prepare_order_db",
+            return_value=fake_draft,
+        ) as mock_prepare,
+    ):
+        response = test_client.post(
+            "/chat",
+            json={
+                "chats": [
+                    {"role": "user", "content": "Prepare an order for product 101."}
+                ]
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "answer": "Your order draft is ready.",
+            "order_draft": fake_draft,
+        }
+        mock_prepare.assert_called_once_with(101, 1)
+        assert mock_create.call_count == 2
