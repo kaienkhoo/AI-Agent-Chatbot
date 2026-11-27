@@ -4,13 +4,11 @@ from fastapi.testclient import TestClient
 from openai import APIConnectionError
 from main import (
     app,
-    client,
     find_product,
-    find_order,
-    TOOL_HANDLERS,
-    AGENT_INSTRUCTIONS,
 )
-from copy import deepcopy
+
+from agent_tools import find_order
+from agent import client, AGENT_INSTRUCTIONS, TOOL_HANDLERS
 
 test_client = TestClient(app)
 
@@ -49,7 +47,7 @@ def test_find_product_returns_none_for_missing_product():
 
 
 def test_get_product_returns_correct_product():
-    with patch("main.find_product_db") as mock_lookup:
+    with patch("agent_tools.find_product_db") as mock_lookup:
         mock_lookup.return_value = {
             "id": 101,
             "name": "Wireless Mouse",
@@ -211,7 +209,7 @@ def test_find_order_delegates_to_database():
         "status": "delivered",
     }
 
-    with patch("main.find_order_db", return_value=expected_order) as mock_lookup:
+    with patch("agent_tools.find_order_db", return_value=expected_order) as mock_lookup:
         result = find_order(5001)
 
         assert result == expected_order
@@ -585,7 +583,7 @@ def test_chat_returns_created_order_draft():
             side_effect=[fake_first_response, fake_second_response],
         ) as mock_create,
         patch(
-            "main.prepare_order_db",
+            "agent_tools.prepare_order_db",
             return_value=fake_draft,
         ) as mock_prepare,
     ):
@@ -634,7 +632,7 @@ def test_chat_handles_failed_order_preparation():
             side_effect=[fake_first_response, fake_second_response],
         ) as mock_create,
         patch(
-            "main.prepare_order_db",
+            "agent_tools.prepare_order_db",
             side_effect=ValueError("Insufficient stock"),
         ) as mock_prepare,
     ):
@@ -714,7 +712,7 @@ def test_chat_prevents_duplicate_order_drafts():
             ],
         ) as mock_create,
         patch(
-            "main.prepare_order_db",
+            "agent_tools.prepare_order_db",
             return_value=fake_draft,
         ) as mock_prepare,
     ):
@@ -759,7 +757,7 @@ def test_chat_blocks_ordering_when_disabled():
             "create",
             return_value=fake_response,
         ) as mock_create,
-        patch("main.prepare_order_db") as mock_prepare,
+        patch("agent_tools.prepare_order_db") as mock_prepare,
     ):
         response = test_client.post(
             "/chat",
